@@ -487,15 +487,11 @@ int mappabilityMain(int argc, char const ** argv)
             std::cout << "- Index was built on a single fasta file.\n" << std::flush;
     }
 
-    // TODO: remove brackets, opt.alphabet and replace by local bool.
+    // TODO: remove opt.alphabet and replace by bool
     if (opt.alphabet == "dna4")
-    {
         run<Dna>(opt, searchParams);
-    }
     else
-    {
         run<Dna5>(opt, searchParams);
-    }
 
     return 0;
 }
