@@ -249,24 +249,200 @@ inline void extend(TBiIter it, std::vector<TValue> & hits, std::vector<typename 
     }
 }
 
-template <unsigned errors, bool csvComputation, typename TIndex, typename TText, typename TContainer, typename TChromosomeLengths, typename TLocations, typename TMapping>
-inline void computeMappability(TIndex & index, TText const & text, TContainer & c, SearchParams const & params,
-                               bool const directory, TChromosomeLengths const & chromLengths, TLocations & locations, TMapping const & mappingSeqIdFile)
+// computes a block of adjacent k-mers at once
+template <unsigned errors, bool csvComputation, typename TIndex, typename TText, typename TContainer, typename TChromosomeLengths, typename TLocations, typename TMapping, typename TLimits>
+inline void computeMappabilitySingleBlock(TIndex & index, TText const & text, TContainer & c, SearchParams const & params,
+                                          bool const directory, TChromosomeLengths const & chromLengths, TLocations & locations, TMapping const & mappingSeqIdFile,
+                                          uint64_t const i, uint64_t const j, uint64_t const textLength, TChromosomeLengths const & chromCumLengths, TLimits const & limits,
+                                          std::vector<std::pair<uint64_t, uint64_t>> const & intervals)
 {
     typedef typename TContainer::value_type TValue;
     typedef Iter<TIndex, VSTree<TopDown<> > > TBiIter;
 
-    TChromosomeLengths chromCumLengths;
+    // overlap is the length of the infix!
+    uint64_t maxPos = std::min(i + params.length - params.overlap, textLength - params.length) + 1;
+    if (maxPos > j)
+        maxPos = j;
+
+    // Skip leading and trailing precomputed k-mer frequencies
+    uint64_t beginPos = i;
+    while (beginPos < maxPos && c[beginPos] != 0)
+        ++beginPos;
+
+    uint64_t endPos = maxPos; // endPos is excluding, i.e. [beginPos, endPos)
+    while (i > 0 && endPos - 1 >= i && c[endPos - 1] != 0) // we do not check for i == 0 to avoid an underflow.
+        --endPos;
+
+    if (i != endPos)
     {
-        uint64_t _cumLength = 0;
-        appendValue(chromCumLengths, 0);
-        for (uint64_t i = 0; i < length(chromLengths); ++i)
+        uint64_t overlap = params.length - (endPos - beginPos) + 1;
+
+        auto scheme = OptimalSearchSchemesGM<errors>::VALUE;
+        _optimalSearchSchemeComputeFixedBlocklengthGM(scheme, overlap);
+
+        std::vector<typename TBiIter::TFwdIndexIter> itExact(endPos - beginPos);
+        std::vector<TValue> hits(endPos - beginPos, 0);
+        std::vector<std::vector<typename TBiIter::TFwdIndexIter> > itAll(endPos - beginPos);
+        std::vector<std::vector<typename TBiIter::TFwdIndexIter> > itAllrevCompl(endPos - beginPos);
+
+        auto const & needles = infix(text, beginPos, beginPos + params.length + (endPos - beginPos) - 1);
+        auto const & needlesOverlap = infix(text, beginPos + params.length - overlap, beginPos + params.length);
+        using TNeedlesOverlap = decltype(needlesOverlap);
+
+        uint64_t const bb = std::min(textLength - 1, params.length - 1 + params.length - overlap);
+
+        auto delegate = [&hits, &itExact, &itAll, bb, overlap, &params, &needles](
+            TBiIter it, TNeedlesOverlap const & /*read*/, unsigned const errors_spent)
         {
-            _cumLength += chromLengths[i];
-            appendValue(chromCumLengths, _cumLength);
+            // TODO: we could turn reporting of exact iterators off at compile time by setting reportExactMatch = false if opt.directory is true. Evaluate binary size vs. performance.
+            // WARNING: if it is computed on the directory, csvComputation currently still needs the exact matches (can be updated down below)
+            if (errors_spent == 0)
+            {
+                extend<true, csvComputation, errors>(it, hits, itExact, itAll, errors - errors_spent, needles, params.length,
+                    params.length - overlap, params.length - 1, // searched interval
+                    0, bb // entire interval
+                );
+            }
+            else
+            {
+                extend<false, csvComputation, errors>(it, hits, itExact, itAll, errors - errors_spent, needles, params.length,
+                    params.length - overlap, params.length - 1, // searched interval
+                    0, bb // entire interval
+                );
+            }
+        };
+
+        if (params.revCompl)
+        {
+            ModRevCompl<typename std::remove_reference<decltype(needles)>::type> needlesRevCompl(needles);
+            ModRevCompl<typename std::remove_reference<decltype(needlesOverlap)>::type> needlesRevComplOverlap(needlesOverlap);
+            using TNeedlesRevComplOverlap = decltype(needlesRevComplOverlap);
+
+            // TODO: could store the exact hits as well and use these values!
+            auto delegateRevCompl = [&hits, &itExact, &itAllrevCompl, bb, overlap, &params, &needlesRevCompl](
+                TBiIter it, TNeedlesRevComplOverlap const & /*read*/, unsigned const errors_spent)
+            {
+                extend<false, csvComputation, errors>(it, hits, itExact, itAllrevCompl, errors - errors_spent, needlesRevCompl, params.length,
+                    params.length - overlap, params.length - 1, // searched interval
+                    0, bb // entire interval
+                );
+            };
+
+            TBiIter it(index);
+            _optimalSearchSchemeGM(delegateRevCompl, it, needlesRevComplOverlap, scheme, HammingDistance());
+
+            // hits of the reverse-complement are stored in reversed order.
+            std::reverse(hits.begin(), hits.end());
+        }
+
+        TBiIter it(index);
+        _optimalSearchSchemeGM(delegate, it, needlesOverlap, scheme, HammingDistance());
+        for (uint64_t j = beginPos; j < endPos; ++j)
+        {
+            SEQAN_IF_CONSTEXPR (csvComputation)
+            {
+                using TLocation = typename TLocations::key_type;
+                using TEntry = std::pair<TLocation, std::pair<std::vector<TLocation>, std::vector<TLocation> > >;
+
+                TEntry entry;
+
+                uint64_t size = 0;
+                for (auto const & iterator : itAll[j - beginPos])
+                    size += countOccurrences(iterator);
+                entry.second.first.reserve(size);
+
+                size = 0;
+                for (auto const & iterator : itAllrevCompl[j - beginPos])
+                    size += countOccurrences(iterator);
+                entry.second.second.reserve(size);
+
+                for (auto const & iterator : itAll[j - beginPos])
+                {
+                    for (auto const & occ : getOccurrences(iterator))
+                    {
+                        entry.second.first.push_back(occ);
+                    }
+                }
+                // sorting is needed for output when multiple fasta files are indexed and the locations need to be separated by filename.
+                std::sort(entry.second.first.begin(), entry.second.first.end());
+
+                // NOTE: vector has to be iterated over in reverse order (compared to itAll)
+                // for (auto const & iterator : itAllrevCompl[j - beginPos])
+                for (auto const & iterator : itAllrevCompl[endPos - 1 - j])
+                {
+                    for (auto const & occ : getOccurrences(iterator))
+                    {
+                        entry.second.second.push_back(occ);
+                    }
+                }
+                // sorting is needed for output when multiple fasta files are indexed and the locations need to be separated by filename.
+                std::sort(entry.second.second.begin(), entry.second.second.end());
+
+                // overwrite frequency vector
+                if (params.excludePseudo)
+                {
+                    std::set<typename Value<TLocation, 1>::Type> distinct_sequences;
+                    for (auto const & location : entry.second.first) // forward strand
+                        distinct_sequences.insert(mappingSeqIdFile[location.i1]);
+                    assert(entry.second.second.size() == 0 || params.revCompl);
+                    for (auto const & location : entry.second.second) // reverse strand
+                        distinct_sequences.insert(mappingSeqIdFile[location.i1]);
+
+                    hits[j - beginPos] = distinct_sequences.size();
+
+                    // NOTE: If you want to filter certain k-mers in the csv file based on the mappability value
+                    // (with respect to --exclude-pseudo) you can unset 'entry' here.
+
+                }
+
+                if (!directory && countOccurrences(itExact[j - beginPos]) > 1)
+                {
+                    // the for-loop does not insert an entry for kmers originating from a position such that the kmer spans two sequences. Hence we insert it here. The occurrences will later be cleared by resetLimits, but at least the position exists in the map.
+                    myPosLocalize(entry.first, j, chromCumLengths); // TODO: inefficient for read data sets   0 > 0
+                    if (entry.first.i2 > chromLengths[entry.first.i1] - params.length)
+                    {
+                        #pragma omp critical
+                        locations.insert(entry);
+                    }
+
+                    for (auto const & exact_occ : getOccurrences(itExact[j - beginPos]))
+                    {
+                        entry.first = exact_occ;
+                        // TODO: avoid copying
+                        #pragma omp critical
+                        locations.insert(entry);
+                    }
+                }
+                else
+                {
+                    myPosLocalize(entry.first, j, chromCumLengths); // TODO: inefficient for read data sets
+                    // TODO: avoid copying
+                    #pragma omp critical
+                    locations.insert(entry);
+                }
+            }
+
+            if (!directory && intervals.empty() && countOccurrences(itExact[j - beginPos]) > 1) // guaranteed to exist, since there has to be at least one match!
+            {
+                for (auto const & occ : getOccurrences(itExact[j-beginPos]))
+                {
+                    auto const occ_pos = posGlobalize(occ, limits);
+                    c[occ_pos] = hits[j - beginPos];
+                }
+            }
+            else
+            {
+                c[j] = hits[j - beginPos];
+            }
         }
     }
+}
 
+template <unsigned errors, bool csvComputation, typename TIndex, typename TText, typename TContainer, typename TChromosomeLengths, typename TLocations, typename TMapping>
+inline void computeMappability(TIndex & index, TText const & text, TContainer & c, SearchParams const & params,
+                               bool const directory, TChromosomeLengths const & chromLengths, TChromosomeLengths const & chromCumLengths, TLocations & locations,
+                               TMapping const & mappingSeqIdFile, std::vector<std::pair<uint64_t, uint64_t>> const & intervals)
+{
     auto const & limits = stringSetLimits(indexText(index));
     uint64_t const textLength = length(text);
     uint64_t const numberOfKmers = textLength - params.length + 1;
@@ -281,189 +457,35 @@ inline void computeMappability(TIndex & index, TText const & text, TContainer & 
     uint64_t const chunkSize = std::max<uint64_t>(1, numberOfKmers / (stepSize * params.threads * 50));
     #pragma clang diagnostic pop
 
-    uint64_t progressCount, progressMax, progressStep;
-    initProgress<outputProgress>(progressCount, progressStep, progressMax, stepSize, numberOfKmers);
-
-    #pragma omp parallel for schedule(dynamic, chunkSize) num_threads(params.threads)
-    for (uint64_t i = 0; i < numberOfKmers; i += stepSize)
+    if (intervals.empty())
     {
-        // overlap is the length of the infix!
-        uint64_t maxPos = std::min(i + params.length - params.overlap, textLength - params.length) + 1;
+        uint64_t progressCount, progressMax, progressStep;
+        initProgress<outputProgress>(progressCount, progressStep, progressMax, stepSize, numberOfKmers);
 
-        // Skip leading and trailing precomputed k-mer frequencies
-        uint64_t beginPos = i;
-        while (beginPos < maxPos && c[beginPos] != 0)
-            ++beginPos;
-
-        uint64_t endPos = maxPos; // endPos is excluding, i.e. [beginPos, endPos)
-        while (i > 0 && endPos - 1 >= i && c[endPos - 1] != 0) // we do not check for i == 0 to avoid an underflow.
-            --endPos;
-
-        if (i != endPos)
+        #pragma omp parallel for schedule(dynamic, chunkSize) num_threads(params.threads)
+        for (uint64_t i = 0; i < numberOfKmers; i += stepSize)
         {
-            uint64_t overlap = params.length - (endPos - beginPos) + 1;
-
-            auto scheme = OptimalSearchSchemesGM<errors>::VALUE;
-            _optimalSearchSchemeComputeFixedBlocklengthGM(scheme, overlap);
-
-            std::vector<typename TBiIter::TFwdIndexIter> itExact(endPos - beginPos);
-            std::vector<TValue> hits(endPos - beginPos, 0);
-            std::vector<std::vector<typename TBiIter::TFwdIndexIter> > itAll(endPos - beginPos);
-            std::vector<std::vector<typename TBiIter::TFwdIndexIter> > itAllrevCompl(endPos - beginPos);
-
-            auto const & needles = infix(text, beginPos, beginPos + params.length + (endPos - beginPos) - 1);
-            auto const & needlesOverlap = infix(text, beginPos + params.length - overlap, beginPos + params.length);
-            using TNeedlesOverlap = decltype(needlesOverlap);
-
-            uint64_t const bb = std::min(textLength - 1, params.length - 1 + params.length - overlap);
-
-            auto delegate = [&hits, &itExact, &itAll, bb, overlap, &params, &needles](
-                TBiIter it, TNeedlesOverlap const & /*read*/, unsigned const errors_spent)
-            {
-                // TODO: we could turn reporting of exact iterators off at compile time by setting reportExactMatch = false if opt.directory is true. Evaluate binary size vs. performance.
-                // WARNING: if it is computed on the directory, csvComputation currently still needs the exact matches (can be updated down below)
-                if (errors_spent == 0)
-                {
-                    extend<true, csvComputation, errors>(it, hits, itExact, itAll, errors - errors_spent, needles, params.length,
-                        params.length - overlap, params.length - 1, // searched interval
-                        0, bb // entire interval
-                    );
-                }
-                else
-                {
-                    extend<false, csvComputation, errors>(it, hits, itExact, itAll, errors - errors_spent, needles, params.length,
-                        params.length - overlap, params.length - 1, // searched interval
-                        0, bb // entire interval
-                    );
-                }
-            };
-
-            if (params.revCompl)
-            {
-                ModRevCompl<typename std::remove_reference<decltype(needles)>::type> needlesRevCompl(needles);
-                ModRevCompl<typename std::remove_reference<decltype(needlesOverlap)>::type> needlesRevComplOverlap(needlesOverlap);
-                using TNeedlesRevComplOverlap = decltype(needlesRevComplOverlap);
-
-                // TODO: could store the exact hits as well and use these values!
-                auto delegateRevCompl = [&hits, &itExact, &itAllrevCompl, bb, overlap, &params, &needlesRevCompl](
-                    TBiIter it, TNeedlesRevComplOverlap const & /*read*/, unsigned const errors_spent)
-                {
-                    extend<false, csvComputation, errors>(it, hits, itExact, itAllrevCompl, errors - errors_spent, needlesRevCompl, params.length,
-                        params.length - overlap, params.length - 1, // searched interval
-                        0, bb // entire interval
-                    );
-                };
-
-                TBiIter it(index);
-                _optimalSearchSchemeGM(delegateRevCompl, it, needlesRevComplOverlap, scheme, HammingDistance());
-
-                // hits of the reverse-complement are stored in reversed order.
-                std::reverse(hits.begin(), hits.end());
-            }
-
-            TBiIter it(index);
-            _optimalSearchSchemeGM(delegate, it, needlesOverlap, scheme, HammingDistance());
-            for (uint64_t j = beginPos; j < endPos; ++j)
-            {
-                SEQAN_IF_CONSTEXPR (csvComputation)
-                {
-                    using TLocation = typename TLocations::key_type;
-                    using TEntry = std::pair<TLocation, std::pair<std::vector<TLocation>, std::vector<TLocation> > >;
-
-                    TEntry entry;
-
-                    uint64_t size = 0;
-                    for (auto const & iterator : itAll[j - beginPos])
-                        size += countOccurrences(iterator);
-                    entry.second.first.reserve(size);
-
-                    size = 0;
-                    for (auto const & iterator : itAllrevCompl[j - beginPos])
-                        size += countOccurrences(iterator);
-                    entry.second.second.reserve(size);
-
-                    for (auto const & iterator : itAll[j - beginPos])
-                    {
-                        for (auto const & occ : getOccurrences(iterator))
-                        {
-                            entry.second.first.push_back(occ);
-                        }
-                    }
-                    // sorting is needed for output when multiple fasta files are indexed and the locations need to be separated by filename.
-                    std::sort(entry.second.first.begin(), entry.second.first.end());
-
-                    // NOTE: vector has to be iterated over in reverse order (compared to itAll)
-                    // for (auto const & iterator : itAllrevCompl[j - beginPos])
-                    for (auto const & iterator : itAllrevCompl[endPos - 1 - j])
-                    {
-                        for (auto const & occ : getOccurrences(iterator))
-                        {
-                            entry.second.second.push_back(occ);
-                        }
-                    }
-                    // sorting is needed for output when multiple fasta files are indexed and the locations need to be separated by filename.
-                    std::sort(entry.second.second.begin(), entry.second.second.end());
-
-                    // overwrite frequency vector
-                    if (params.excludePseudo)
-                    {
-                        std::set<typename Value<TLocation, 1>::Type> distinct_sequences;
-                        for (auto const & location : entry.second.first) // forward strand
-                            distinct_sequences.insert(mappingSeqIdFile[location.i1]);
-                        assert(entry.second.second.size() == 0 || params.revCompl);
-                        for (auto const & location : entry.second.second) // reverse strand
-                            distinct_sequences.insert(mappingSeqIdFile[location.i1]);
-
-                        hits[j - beginPos] = distinct_sequences.size();
-
-                        // NOTE: If you want to filter certain k-mers in the csv file based on the mappability value
-                        // (with respect to --exclude-pseudo) you can unset 'entry' here.
-
-                    }
-
-                    if (!directory && countOccurrences(itExact[j - beginPos]) > 1)
-                    {
-                        // the for-loop does not insert an entry for kmers originating from a position such that the kmer spans two sequences. Hence we insert it here. The occurrences will later be cleared by resetLimits, but at least the position exists in the map.
-                        myPosLocalize(entry.first, j, chromCumLengths); // TODO: inefficient for read data sets   0 > 0
-                        if (entry.first.i2 > chromLengths[entry.first.i1] - params.length)
-                        {
-                            #pragma omp critical
-                            locations.insert(entry);
-                        }
-
-                        for (auto const & exact_occ : getOccurrences(itExact[j - beginPos]))
-                        {
-                            entry.first = exact_occ;
-                            // TODO: avoid copying
-                            #pragma omp critical
-                            locations.insert(entry);
-                        }
-                    }
-                    else
-                    {
-                        myPosLocalize(entry.first, j, chromCumLengths); // TODO: inefficient for read data sets
-                        // TODO: avoid copying
-                        #pragma omp critical
-                        locations.insert(entry);
-                    }
-                }
-
-                if (!directory && countOccurrences(itExact[j - beginPos]) > 1) // guaranteed to exist, since there has to be at least one match!
-                {
-                    for (auto const & occ : getOccurrences(itExact[j-beginPos]))
-                    {
-                        auto const occ_pos = posGlobalize(occ, limits);
-                        c[occ_pos] = hits[j - beginPos];
-                    }
-                }
-                else
-                {
-                    c[j] = hits[j - beginPos];
-                }
-            }
+            computeMappabilitySingleBlock<errors, csvComputation>(index, text, c, params, directory, chromLengths, locations, mappingSeqIdFile, i, i + numberOfKmers, textLength, chromCumLengths, limits, intervals);
+            printProgress<outputProgress>(progressCount, progressStep, progressMax);
         }
+    }
+    else
+    {
+        uint64_t progressCount, progressMax, progressStep;
+        initProgress<outputProgress>(progressCount, progressStep, progressMax, 1, intervals.size());
 
-        printProgress<outputProgress>(progressCount, progressStep, progressMax);
+        // NOTE: chunksize for scheduling would depend on number of intervals, size of intervals, deviation of interval sizes, etc.
+        // Hence, for simplicity we do not suggest a chunk size
+        #pragma omp parallel for schedule(dynamic) num_threads(params.threads)
+        for (auto interval = intervals.begin(); interval < intervals.end(); ++interval)
+        {
+            for (uint64_t i = (*interval).first; i < (*interval).second; i += stepSize)
+            {
+                uint64_t j = (*interval).second;
+                computeMappabilitySingleBlock<errors, csvComputation>(index, text, c, params, directory, chromLengths, locations, mappingSeqIdFile, i, j, textLength, chromCumLengths, limits, intervals);
+            }
+            printProgress<outputProgress>(progressCount, progressStep, progressMax);
+        }
     }
 
     // The algorithm searches k-mers in the concatenation of all strings in the fasta file (e.g. chromosomes).
