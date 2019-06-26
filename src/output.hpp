@@ -258,3 +258,101 @@ void saveCsv(std::string const & output_path, TLocations const & locations,
 
     csvFile.close();
 }
+
+template <bool mappability, typename TLocations, typename TDirectoryInformation>
+void saveKmerStatistics(std::string const & output_path, TLocations const & locations,
+             SearchParams const & searchParams, TDirectoryInformation const & directoryInformation)
+{
+    char buffer[BUFFER_SIZE];
+
+    std::ofstream csvFile(output_path + ".stats.csv");
+    csvFile.rdbuf()->pubsetbuf(buffer, BUFFER_SIZE);
+
+    uint64_t chromosomeCount = 0;
+    std::vector<std::pair<std::string, uint64_t> > fastaFiles; // fasta file, cumulative nbr. of chromosomes
+    std::string lastFastaFile = std::get<0>(retrieveDirectoryInformationLine(directoryInformation[0]));
+    for (auto const & row : directoryInformation)
+    {
+        auto const line = retrieveDirectoryInformationLine(row);
+        if (lastFastaFile != std::get<0>(line))
+        {
+            fastaFiles.push_back({lastFastaFile, chromosomeCount - 1});
+            lastFastaFile = std::get<0>(line);
+        }
+        ++chromosomeCount;
+    }
+
+    csvFile << "\"k-mer_chrom\"";
+    csvFile << "\t";
+    csvFile << "\"k-mer_pos\"";
+    for (auto const & fastaFile : fastaFiles)
+        csvFile << "\t\"+ strand " << fastaFile.first << "\"";
+    if (searchParams.revCompl) // TODO: make it constexpr?
+    {
+        for (auto const & fastaFile : fastaFiles)
+            csvFile << "\t\"- strand " << fastaFile.first << "\"";
+    }
+    csvFile << '\n';
+
+    for (auto const & kmerLocations : locations)
+    {
+        auto const & kmerPos = kmerLocations.first;
+        auto const & plusStrandLoc = kmerLocations.second.first;
+        auto const & minusStrandLoc = kmerLocations.second.second;
+
+        csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
+
+        uint64_t i = 0;
+        uint64_t nbrChromosomesInPreviousFastas = 0;
+        for (auto const & fastaFile : fastaFiles)
+        {
+            csvFile << '\t';
+            bool subsequentIterations = false;
+            uint64_t plusStrandOcc = 0;
+            //csvFile << plusStrandLoc.size();
+
+            while (i < plusStrandLoc.size() && plusStrandLoc[i].i1 <= fastaFile.second)
+            {
+                /*
+                if (subsequentIterations)
+                    csvFile << '|'; // separator for multiple locations in one column
+                csvFile << (plusStrandLoc[i].i1 - nbrChromosomesInPreviousFastas) << ',' << plusStrandLoc[i].i2;
+                subsequentIterations = true;
+                */
+                ++i;
+                ++plusStrandOcc;
+            }
+            csvFile << plusStrandOcc;
+            nbrChromosomesInPreviousFastas = fastaFile.second + 1;
+        }
+
+        if (searchParams.revCompl)
+        {
+            uint64_t i = 0;
+            uint64_t nbrChromosomesInPreviousFastas = 0;
+            for (auto const & fastaFile : fastaFiles)
+            {
+                csvFile << '\t';
+                bool subsequentIterations = false;
+                uint64_t minusStrandOcc = 0;
+
+                while (i < minusStrandLoc.size() && minusStrandLoc[i].i1 <= fastaFile.second)
+                {
+                    /*
+                    if (subsequentIterations)
+                        csvFile << '|'; // separator for multiple locations in one column
+                    csvFile << (minusStrandLoc[i].i1 - nbrChromosomesInPreviousFastas) << ',' << minusStrandLoc[i].i2;
+                    subsequentIterations = true;
+                    */
+                    ++i;
+                    ++minusStrandOcc;
+                }
+                csvFile << minusStrandOcc;
+                nbrChromosomesInPreviousFastas = fastaFile.second + 1;
+            }
+        }
+        csvFile << '\n';
+    }
+
+    csvFile.close();
+}

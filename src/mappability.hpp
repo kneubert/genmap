@@ -26,6 +26,7 @@ struct Options
     bool rawFile;
     bool txtFile;
     bool csvFile;
+    bool statsFile;
     OutputType outputType;
     bool directory;
     bool verbose;
@@ -118,8 +119,7 @@ inline void outputMappability(TVector const & c, Options const & opt, SearchPara
             std::cout << "- BED file written in " << (round((get_wall_time() - start) * 100.0) / 100.0) << " seconds\n";
     }
 
-    if (opt.csvFile)
-    {
+    if (opt.csvFile) {
         double start = get_wall_time();
         if (opt.outputType == OutputType::mappability)
             saveCsv<true>(output_path, locations, searchParams, directoryInformation);
@@ -128,6 +128,18 @@ inline void outputMappability(TVector const & c, Options const & opt, SearchPara
         if (opt.verbose)
             std::cout << "- CSV file written in " << (round((get_wall_time() - start) * 100.0) / 100.0) << " seconds\n";
     }
+
+    if (opt.statsFile)
+    {
+        double start = get_wall_time();
+        if (opt.outputType == OutputType::mappability)
+            saveKmerStatistics<true>(output_path, locations, searchParams, directoryInformation);
+        else
+            saveKmerStatistics<false>(output_path, locations, searchParams, directoryInformation);
+        if (opt.verbose)
+            std::cout << "- Stats file written in " << (round((get_wall_time() - start) * 100.0) / 100.0) << " seconds\n";
+    }
+
 
     if (!opt.verbose)
         std::cout << " done!\n";
@@ -334,6 +346,9 @@ int mappabilityMain(int argc, char const ** argv)
     addOption(parser, ArgParseOption("d", "csv",
         "Output a detailed csv file reporting the locations of each k-mer (WARNING: This will produce large files and makes computing the mappability significantly slower)."));
 
+    addOption(parser, ArgParseOption("s", "stats",
+                                     "Output a k-mer statistic reporting the number of locations of each k-mer (WARNING: This will produce large files and makes computing the mappability significantly slower)."));
+
     addOption(parser, ArgParseOption("m", "memory-mapping",
         "Turns memory-mapping on, i.e. the index is not loaded into RAM but accessed directly from secondary-memory. This may increase the overall running time, but do NOT use it if the index lies on network storage."));
 
@@ -377,6 +392,7 @@ int mappabilityMain(int argc, char const ** argv)
     opt.rawFile = isSet(parser, "raw");
     opt.txtFile = isSet(parser, "txt");
     opt.csvFile = isSet(parser, "csv");
+    opt.statsFile = isSet(parser, "stats");
     opt.verbose = isSet(parser, "verbose");
 
     if (!opt.wigFile && !opt.bedFile && !opt.rawFile && !opt.txtFile && !opt.csvFile)
