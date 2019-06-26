@@ -303,52 +303,32 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
         csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
 
         uint64_t i = 0;
-        uint64_t nbrChromosomesInPreviousFastas = 0;
         for (auto const & fastaFile : fastaFiles)
         {
             csvFile << '\t';
-            bool subsequentIterations = false;
             uint64_t plusStrandOcc = 0;
-            //csvFile << plusStrandLoc.size();
-
             while (i < plusStrandLoc.size() && plusStrandLoc[i].i1 <= fastaFile.second)
             {
-                /*
-                if (subsequentIterations)
-                    csvFile << '|'; // separator for multiple locations in one column
-                csvFile << (plusStrandLoc[i].i1 - nbrChromosomesInPreviousFastas) << ',' << plusStrandLoc[i].i2;
-                subsequentIterations = true;
-                */
                 ++i;
                 ++plusStrandOcc;
             }
             csvFile << plusStrandOcc;
-            nbrChromosomesInPreviousFastas = fastaFile.second + 1;
         }
 
         if (searchParams.revCompl)
         {
             uint64_t i = 0;
-            uint64_t nbrChromosomesInPreviousFastas = 0;
             for (auto const & fastaFile : fastaFiles)
             {
                 csvFile << '\t';
-                bool subsequentIterations = false;
                 uint64_t minusStrandOcc = 0;
 
                 while (i < minusStrandLoc.size() && minusStrandLoc[i].i1 <= fastaFile.second)
                 {
-                    /*
-                    if (subsequentIterations)
-                        csvFile << '|'; // separator for multiple locations in one column
-                    csvFile << (minusStrandLoc[i].i1 - nbrChromosomesInPreviousFastas) << ',' << minusStrandLoc[i].i2;
-                    subsequentIterations = true;
-                    */
                     ++i;
                     ++minusStrandOcc;
                 }
                 csvFile << minusStrandOcc;
-                nbrChromosomesInPreviousFastas = fastaFile.second + 1;
             }
         }
         csvFile << '\n';
