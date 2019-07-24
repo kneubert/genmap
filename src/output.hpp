@@ -286,12 +286,13 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
     csvFile << "\t";
     csvFile << "\"k-mer_pos\"";
     for (auto const & fastaFile : fastaFiles)
-        csvFile << "\t\"+ strand " << fastaFile.first << "\"";
-    if (searchParams.revCompl) // TODO: make it constexpr?
-    {
-        for (auto const & fastaFile : fastaFiles)
-            csvFile << "\t\"- strand " << fastaFile.first << "\"";
-    }
+        csvFile << "\t\"" << fastaFile.first << "\"";
+        //csvFile << "\t\"+ strand " << fastaFile.first << "\"";
+    //if (searchParams.revCompl) // TODO: make it constexpr?
+    //{
+    //    for (auto const & fastaFile : fastaFiles)
+    //        csvFile << "\t\"- strand " << fastaFile.first << "\"";
+    //}
     csvFile << '\n';
 
     for (auto const & kmerLocations : locations)
@@ -300,19 +301,31 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
         auto const & plusStrandLoc = kmerLocations.second.first;
         auto const & minusStrandLoc = kmerLocations.second.second;
 
-        csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
+        //csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
 
-        uint64_t i = 0;
+        //uint64_t i = 0;
+        std::vector<uint64_t> plusStrandLocations;
+        std::vector<uint64_t> minusStrandLocations;
+        std::vector<uint64_t> allStrandLocations;
+
+        /*
+        bool non_repeated = true;
+
         for (auto const & fastaFile : fastaFiles)
         {
             csvFile << '\t';
             uint64_t plusStrandOcc = 0;
+
             while (i < plusStrandLoc.size() && plusStrandLoc[i].i1 <= fastaFile.second)
             {
                 ++i;
                 ++plusStrandOcc;
             }
             csvFile << plusStrandOcc;
+            plusStrandLocations.push_back(plusStrandOcc);
+            if (plusStrandOcc > 1) {
+                non_repeated = false;
+            }
         }
 
         if (searchParams.revCompl)
@@ -328,10 +341,53 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
                     ++i;
                     ++minusStrandOcc;
                 }
+                minusStrandLocations.push_back(minusStrandOcc);
+                if (minusStrandOcc > 1) {
+                    non_repeated = false;
+                }
                 csvFile << minusStrandOcc;
             }
         }
-        csvFile << '\n';
+        */
+
+        uint64_t i = 0;
+        uint64_t j = 0;
+        for (auto const & fastaFile : fastaFiles)
+        {
+            uint64_t allStrandOcc = 0;
+
+            while (i < plusStrandLoc.size() && plusStrandLoc[i].i1 <= fastaFile.second) {
+                ++i;
+                ++allStrandOcc;
+            }
+
+            if (searchParams.revCompl)
+            {
+                while (j < minusStrandLoc.size() && minusStrandLoc[j].i1 <= fastaFile.second) {
+                    ++j;
+                    ++allStrandOcc;
+                }
+            }
+            allStrandLocations.push_back(allStrandOcc);
+        }
+
+
+
+        //if (non_repeated) {
+            csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
+          //  for (auto const & plusLoc : plusStrandLocations)
+            for (auto const & loc : allStrandLocations)
+            {
+                csvFile << '\t';
+                csvFile << loc;
+            }
+            //for (auto const & minusLoc : minusStrandLocations)
+            //{
+            //    csvFile << '\t';
+            //    csvFile << minusLoc;
+            //}
+            csvFile << '\n';
+        //}
     }
 
     csvFile.close();
