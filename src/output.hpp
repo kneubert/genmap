@@ -1,11 +1,15 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <tuple>
 
 // TODO: investigate performance of buffer sizes (stack overflow might occur leading to a segmentation fault)
 #define     BUFFER_SIZE     32*1024 // 32 KB
 
 using namespace seqan;
+
+//saveConsScore(SearchParams const & searchParams, std::string const & output_path, std::vector<std::tuple<uint64_t, uint64_t, float>> & kmerFrequency);
+
 
 template <bool mappability, typename T>
 void saveRaw(std::vector<T> const & c, std::string const & output_path)
@@ -285,6 +289,8 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
     csvFile << "\"k-mer_chrom\"";
     csvFile << "\t";
     csvFile << "\"k-mer_pos\"";
+    csvFile << "\t";
+    csvFile << "\"F\"";
     for (auto const & fastaFile : fastaFiles)
         csvFile << "\t\"" << fastaFile.first << "\"";
         //csvFile << "\t\"+ strand " << fastaFile.first << "\"";
@@ -294,6 +300,11 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
     //        csvFile << "\t\"- strand " << fastaFile.first << "\"";
     //}
     csvFile << '\n';
+
+    uint64_t num_genomes = fastaFiles.size();
+    std::cout << "processing statistics for " << num_genomes << " genomes" << std::endl;
+    std::vector<std::tuple<uint64_t, uint64_t, float> > kmerFrequency;
+
 
     for (auto const & kmerLocations : locations)
     {
@@ -352,6 +363,7 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
 
         uint64_t i = 0;
         uint64_t j = 0;
+        uint64_t f = 0;
         for (auto const & fastaFile : fastaFiles)
         {
             uint64_t allStrandOcc = 0;
@@ -368,27 +380,94 @@ void saveKmerStatistics(std::string const & output_path, TLocations const & loca
                     ++allStrandOcc;
                 }
             }
+            if (allStrandOcc > 0)
+            {
+                f += 1;
+            }
             allStrandLocations.push_back(allStrandOcc);
         }
 
 
-
         //if (non_repeated) {
-            csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
-          //  for (auto const & plusLoc : plusStrandLocations)
-            for (auto const & loc : allStrandLocations)
-            {
-                csvFile << '\t';
-                csvFile << loc;
-            }
-            //for (auto const & minusLoc : minusStrandLocations)
-            //{
-            //    csvFile << '\t';
-            //    csvFile << minusLoc;
-            //}
-            csvFile << '\n';
-        //}
+        csvFile << kmerPos.i1 << '\t' << kmerPos.i2;
+        csvFile << '\t' << static_cast<float>(f)/ static_cast<float>(num_genomes);
+
+        float freq = static_cast<float>(f)/ static_cast<float>(num_genomes);
+        std::tuple<uint64_t, uint64_t, float> tfreq = std::make_tuple(kmerPos.i1, kmerPos.i2, freq);
+        kmerFrequency.push_back(tfreq);
+
+        for (auto const & occ : allStrandLocations)
+        {
+            csvFile << '\t';
+            csvFile << occ;
+        }
+
+        csvFile << '\n';
+
     }
 
+    csvFile.close();
+
+    std::ofstream csvFile2(output_path + ".cp.csv");
+    csvFile2.rdbuf()->pubsetbuf(buffer, BUFFER_SIZE);
+
+    csvFile2 << "chr";
+    csvFile2 << "\t";
+    csvFile2 << "pos";
+    csvFile2 << "\t";
+    csvFile2 << "Fp";
+    csvFile2 << "\t";
+    csvFile2 << "Cp";
+    csvFile2 << "\n";
+
+
+    // regions
+    std::ofstream csRegionsFile(output_path + ".cs.bed");
+    csRegionsFile.rdbuf()->pubsetbuf(buffer, BUFFER_SIZE);
+
+
+    float val = 0;
+    uint64_t region_start = 0;
+    uint64_t region_end = 0;
+
+    for (auto it = kmerFrequency.begin() + searchParams.length - 1; it != kmerFrequency.end(); ++it)
+    {
+        auto const &kmerChr = std::get<0>(*(it));
+        auto const &kmerPos = std::get<1>(*(it));
+        auto const &kmerFreq = std::get<2>(*(it));
+
+        csvFile2 << kmerChr;
+        csvFile2 << "\t";
+        csvFile2 << kmerPos;
+        csvFile2 << "\t";
+        csvFile2 << kmerFreq;
+        csvFile2 << "\t";
+
+        float max = 0;
+        for (auto it2 = it - searchParams.length + 1; it2 < it; ++it2) {
+            auto const &kmerFreq2 = std::get<2>(*(it2));
+            if (kmerFreq2 > max)
+            {
+                max = kmerFreq2;
+            }
+        }
+        csvFile2 << max << "\n";
+        if (max != val)
+        {
+            region_end = kmerPos - 1;
+            if (val >= 0.95) {
+                csRegionsFile << kmerChr;
+                csRegionsFile << "\t";
+                csRegionsFile << region_start;
+                csRegionsFile << "\t";
+                csRegionsFile << region_end;
+                csRegionsFile << "\n";
+            }
+            region_start = region_end + 1;
+            val = max;
+        }
+
+    }
+    csvFile2.close();
     csvFile.close();
 }
